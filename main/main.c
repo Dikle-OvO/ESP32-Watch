@@ -22,58 +22,79 @@
 #include "esp_lcd_touch_cst816s.h"
 #include "ui/ui.h"
 
-#define EXAMPLE_LCD_H_RES               (240)           /* LCD Horizontal resolution */
-#define EXAMPLE_LCD_V_RES               (320)           /* LCD Vertical resolution */
-#define EXAMPLE_LCD_BIT_PER_PIXEL       (16)            /* LCD bit per pixel */
+#include <time.h>
+#include <sys/time.h>
+#include "cJSON.h"
+#include "esp_wifi.h"
+#include "esp_sntp.h"
+#include "nvs_flash.h"
+#include "esp_event.h"
+#include "esp_system.h"
 
-#define EXAMPLE_LCD_HOST                SPI2_HOST
-#define EXAMPLE_PIN_NUM_LCD_DC          (GPIO_NUM_9)    /* GPIO number for SPI DC*/
-#define EXAMPLE_PIN_NUM_LCD_CS          (GPIO_NUM_10)   /* GPIO number for SPI CS*/
-#define EXAMPLE_PIN_NUM_LCD_PCLK        (GPIO_NUM_11)   /* GPIO number for SPI SCL*/
-#define EXAMPLE_PIN_NUM_LCD_DATA0       (GPIO_NUM_12)   /* GPIO number for SPI SDA*/
-#define EXAMPLE_PIN_NUM_LCD_RST         (GPIO_NUM_13)   /* GPIO number for SPI RESET*/
+#define EXAMPLE_LCD_H_RES (240)        /* LCD Horizontal resolution */
+#define EXAMPLE_LCD_V_RES (320)        /* LCD Vertical resolution */
+#define EXAMPLE_LCD_BIT_PER_PIXEL (16) /* LCD bit per pixel */
 
-#define I2C_MASTER_NUM                  0               /* I2C master i2c port number */
-#define I2C_MASTER_SCL_IO               (GPIO_NUM_4)    /* GPIO number used for I2C master clock */
-#define I2C_MASTER_SDA_IO               (GPIO_NUM_5)    /* GPIO number used for I2C master data  */
-#define EXAMPLE_LCD_TOUCH_RST           (GPIO_NUM_6)    /* GPIO number used for touch pad reset pin */
-#define EXAMPLE_LCD_TOUCH_INT           (GPIO_NUM_7)    /* GPIO number used for touch pad interrupt pin */
-#define I2C_MASTER_FREQ_HZ              400 * 1000      /*!< I2C master clock frequency */
+#define EXAMPLE_LCD_HOST SPI2_HOST
+#define EXAMPLE_PIN_NUM_LCD_DC (GPIO_NUM_9)     /* GPIO number for SPI DC*/
+#define EXAMPLE_PIN_NUM_LCD_CS (GPIO_NUM_10)    /* GPIO number for SPI CS*/
+#define EXAMPLE_PIN_NUM_LCD_PCLK (GPIO_NUM_11)  /* GPIO number for SPI SCL*/
+#define EXAMPLE_PIN_NUM_LCD_DATA0 (GPIO_NUM_12) /* GPIO number for SPI SDA*/
+#define EXAMPLE_PIN_NUM_LCD_RST (GPIO_NUM_13)   /* GPIO number for SPI RESET*/
 
-#define EXAMPLE_LVGL_BUFFER_SIZE        EXAMPLE_LCD_H_RES * 50 * sizeof(lv_color_t)     /*!< LVGL buffer size */
+#define I2C_MASTER_NUM 0                   /* I2C master i2c port number */
+#define I2C_MASTER_SCL_IO (GPIO_NUM_4)     /* GPIO number used for I2C master clock */
+#define I2C_MASTER_SDA_IO (GPIO_NUM_5)     /* GPIO number used for I2C master data  */
+#define EXAMPLE_LCD_TOUCH_RST (GPIO_NUM_6) /* GPIO number used for touch pad reset pin */
+#define EXAMPLE_LCD_TOUCH_INT (GPIO_NUM_7) /* GPIO number used for touch pad interrupt pin */
+#define I2C_MASTER_FREQ_HZ 400 * 1000      /*!< I2C master clock frequency */
 
-#define EXAMPLE_LVGL_TICK_PERIOD_MS     2               /*!< LVGL tick period in ms */
-#define EXAMPLE_LVGL_TASK_MAX_DELAY_MS  500
-#define EXAMPLE_LVGL_TASK_MIN_DELAY_MS  1
-#define EXAMPLE_LVGL_TASK_STACK_SIZE    (5 * 1024)
-#define EXAMPLE_LVGL_TASK_PRIORITY      2
+#define EXAMPLE_LVGL_BUFFER_SIZE EXAMPLE_LCD_H_RES * 50 * sizeof(lv_color_t) /*!< LVGL buffer size */
 
-static char *TAG            = "main";
+#define EXAMPLE_LVGL_TICK_PERIOD_MS 2 /*!< LVGL tick period in ms */
+#define EXAMPLE_LVGL_TASK_MAX_DELAY_MS 500
+#define EXAMPLE_LVGL_TASK_MIN_DELAY_MS 1
+#define EXAMPLE_LVGL_TASK_STACK_SIZE (5 * 1024)
+#define EXAMPLE_LVGL_TASK_PRIORITY 2
 
-static SemaphoreHandle_t    touch_mux   = NULL;
-static SemaphoreHandle_t    lvgl_mux    = NULL;
+static char *TAG = "main";
+
+#define WIFI_SSID "Rua"
+#define WIFI_PASS "20030115"
+#define MAXIMUM_RETRY 5
+
+static int s_retry_num = 0;
+
+static void obtain_time(void);
+static void initialize_sntp(void);
+static void wifi_event_handler(void *arg, esp_event_base_t event_base,
+                               int32_t event_id, void *event_data);
+static void connect_to_wifi(void);
+
+static SemaphoreHandle_t touch_mux = NULL;
+static SemaphoreHandle_t lvgl_mux = NULL;
 
 static const ili9341_lcd_init_cmd_t lcd_init_cmds[] = {
-        /* {cmd, { data }, data_size, delay_ms} */ 
-        {0x11, (uint8_t []){0x00}, 1, 120},
-        {0xB2, (uint8_t []){0x0B, 0x0B, 0x00, 0x33, 0x33}, 5, 0},
-        {0xB7, (uint8_t []){0x11}, 1, 0},
-        {0xBB, (uint8_t []){0x2F}, 1, 0},
-        {0xC0, (uint8_t []){0x2C}, 1, 0},
-        {0xC2, (uint8_t []){0x01}, 1, 0},
-        {0xC3, (uint8_t []){0x0D}, 1, 0},
-        {0xC4, (uint8_t []){0x20}, 1, 0},
-        {0xC6, (uint8_t []){0x13}, 1, 0},
-        {0xD0, (uint8_t []){0xA4, 0xA1}, 2, 0},
-        {0xD6, (uint8_t []){0xA1}, 1, 0},
-        {0xE0, (uint8_t []){0xF0, 0x04, 0x07, 0x09, 0x07, 0x13, 0x25, 0x33, 0x3C, 0x34, 0x10, 0x10, 0x29, 0x32}, 14, 0},
-        {0xE1, (uint8_t []){0xF0, 0x05, 0x08, 0x0A, 0x09, 0x05, 0x25, 0x32, 0x3B, 0x3B, 0x17, 0x18, 0x2E, 0x37}, 14, 0},
-        {0xE4, (uint8_t []){0x25, 0x00, 0x00}, 3, 0},
-        {0x21, (uint8_t []){0x00}, 1, 0},
-        {0x29, (uint8_t []){0x00}, 1, 0},
-        {0x2A, (uint8_t []){0x00, 0x00, 0x00, 0xEF}, 4, 0},
-        {0x2B, (uint8_t []){0x00, 0x14, 0x01, 0x2B}, 4, 0},
-        {0x2C, (uint8_t []){0x00}, 1, 0},
+    /* {cmd, { data }, data_size, delay_ms} */
+    {0x11, (uint8_t[]){0x00}, 1, 120},
+    {0xB2, (uint8_t[]){0x0B, 0x0B, 0x00, 0x33, 0x33}, 5, 0},
+    {0xB7, (uint8_t[]){0x11}, 1, 0},
+    {0xBB, (uint8_t[]){0x2F}, 1, 0},
+    {0xC0, (uint8_t[]){0x2C}, 1, 0},
+    {0xC2, (uint8_t[]){0x01}, 1, 0},
+    {0xC3, (uint8_t[]){0x0D}, 1, 0},
+    {0xC4, (uint8_t[]){0x20}, 1, 0},
+    {0xC6, (uint8_t[]){0x13}, 1, 0},
+    {0xD0, (uint8_t[]){0xA4, 0xA1}, 2, 0},
+    {0xD6, (uint8_t[]){0xA1}, 1, 0},
+    {0xE0, (uint8_t[]){0xF0, 0x04, 0x07, 0x09, 0x07, 0x13, 0x25, 0x33, 0x3C, 0x34, 0x10, 0x10, 0x29, 0x32}, 14, 0},
+    {0xE1, (uint8_t[]){0xF0, 0x05, 0x08, 0x0A, 0x09, 0x05, 0x25, 0x32, 0x3B, 0x3B, 0x17, 0x18, 0x2E, 0x37}, 14, 0},
+    {0xE4, (uint8_t[]){0x25, 0x00, 0x00}, 3, 0},
+    {0x21, (uint8_t[]){0x00}, 1, 0},
+    {0x29, (uint8_t[]){0x00}, 1, 0},
+    {0x2A, (uint8_t[]){0x00, 0x00, 0x00, 0xEF}, 4, 0},
+    {0x2B, (uint8_t[]){0x00, 0x14, 0x01, 0x2B}, 4, 0},
+    {0x2C, (uint8_t[]){0x00}, 1, 0},
 };
 
 static bool example_notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx)
@@ -85,7 +106,7 @@ static bool example_notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, 
 
 static void example_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map)
 {
-    esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t) drv->user_data;
+    esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t)drv->user_data;
     int offsetx1 = area->x1;
     int offsetx2 = area->x2;
     int offsety1 = area->y1;
@@ -94,25 +115,29 @@ static void example_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_
     esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, color_map);
 }
 
-static void example_lvgl_touch_cb(lv_indev_drv_t * drv, lv_indev_data_t * data)
+static void example_lvgl_touch_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
 {
-    uint16_t touchpad_x[1]  = {0};
-    uint16_t touchpad_y[1]  = {0};
-    uint8_t touchpad_cnt    = 0;
+    uint16_t touchpad_x[1] = {0};
+    uint16_t touchpad_y[1] = {0};
+    uint8_t touchpad_cnt = 0;
 
     /* Read touch controller data */
-    if (xSemaphoreTake(touch_mux, 0) == pdTRUE) {
+    if (xSemaphoreTake(touch_mux, 0) == pdTRUE)
+    {
         esp_lcd_touch_read_data(drv->user_data);
     }
 
     /* Get coordinates */
     bool touchpad_pressed = esp_lcd_touch_get_coordinates(drv->user_data, touchpad_x, touchpad_y, NULL, &touchpad_cnt, 1);
 
-    if (touchpad_pressed && touchpad_cnt > 0) {
+    if (touchpad_pressed && touchpad_cnt > 0)
+    {
         data->point.x = touchpad_x[0];
         data->point.y = touchpad_y[0];
         data->state = LV_INDEV_STATE_PRESSED;
-    } else {
+    }
+    else
+    {
         data->state = LV_INDEV_STATE_RELEASED;
     }
 }
@@ -122,7 +147,8 @@ static void touch_callback(esp_lcd_touch_handle_t tp)
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     xSemaphoreGiveFromISR(touch_mux, &xHigherPriorityTaskWoken);
 
-    if (xHigherPriorityTaskWoken) {
+    if (xHigherPriorityTaskWoken)
+    {
         portYIELD_FROM_ISR();
     }
 }
@@ -131,7 +157,6 @@ static void example_increase_lvgl_tick(void *arg)
 {
     /* Tell LVGL how many milliseconds has elapsed */
     lv_tick_inc(EXAMPLE_LVGL_TICK_PERIOD_MS);
-
 }
 
 static bool example_lvgl_lock(int timeout_ms)
@@ -148,24 +173,77 @@ static void example_lvgl_unlock(void)
     xSemaphoreGive(lvgl_mux);
 }
 
+struct timeval tv = {
+    .tv_sec = 0,
+    .tv_usec = 0,
+};
+
+struct tm *timeinfo;
+
+void ui_clock_update(lv_timer_t *timer)
+{
+    gettimeofday(&tv, NULL);
+    timeinfo = localtime(&tv.tv_sec);
+
+    char time_str[9];
+    sprintf(time_str, "%02d:%02d:%02d", timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
+
+    char date_str[50];
+    sprintf(date_str, "%04d/%02d/%02d", timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday);
+
+    lv_label_set_text_fmt(ui_TimeLabel, "%s", time_str);
+}
+
+void ui_time_calibrate(timer_t *epoch_time)
+{
+    obtain_time();
+}
+
+void ui_timer_init()
+{
+    lv_timer_t *timer_clock = lv_timer_create(ui_clock_update, 500, NULL);
+    ui_clock_update(timer_clock);
+
+    lv_timer_t *timer_calibrate = lv_timer_create(ui_time_calibrate, 60 * 60 * 1000, NULL);
+    ui_time_calibrate(timer_calibrate);
+}
+
+void change2id(lv_event_t *e)
+{
+    lv_keyboard_set_textarea(ui_Keyboard2, ui_TextArea1);
+    lv_keyboard_set_mode(ui_Keyboard2, LV_KEYBOARD_MODE_TEXT_LOWER);
+}
+
+void change2pswd(lv_event_t *e)
+{
+    lv_keyboard_set_textarea(ui_Keyboard2, ui_TextArea3);
+    lv_keyboard_set_mode(ui_Keyboard2, LV_KEYBOARD_MODE_NUMBER);
+}
+
 static void example_lvgl_port_task(void *arg)
 {
     ESP_LOGI(TAG, "Starting LVGL task");
     ESP_LOGI(TAG, "Display LVGL UI");
 
     ui_init();
+    ui_timer_init();
 
     uint32_t task_delay_ms = EXAMPLE_LVGL_TASK_MAX_DELAY_MS;
-    while (1) {
+    while (1)
+    {
         /* Lock the mutex due to the LVGL APIs are not thread-safe */
-        if (example_lvgl_lock(-1)) {
+        if (example_lvgl_lock(-1))
+        {
             task_delay_ms = lv_timer_handler();
             /* Release the mutex */
             example_lvgl_unlock();
         }
-        if (task_delay_ms > EXAMPLE_LVGL_TASK_MAX_DELAY_MS) {
+        if (task_delay_ms > EXAMPLE_LVGL_TASK_MAX_DELAY_MS)
+        {
             task_delay_ms = EXAMPLE_LVGL_TASK_MAX_DELAY_MS;
-        } else if (task_delay_ms < EXAMPLE_LVGL_TASK_MIN_DELAY_MS) {
+        }
+        else if (task_delay_ms < EXAMPLE_LVGL_TASK_MIN_DELAY_MS)
+        {
             task_delay_ms = EXAMPLE_LVGL_TASK_MIN_DELAY_MS;
         }
         vTaskDelay(pdMS_TO_TICKS(task_delay_ms));
@@ -174,17 +252,30 @@ static void example_lvgl_port_task(void *arg)
 
 void app_main(void)
 {
-    static lv_disp_draw_buf_t   disp_buf;   /* Contains internal graphic buffer(s) called draw buffer(s) */
-    static lv_disp_drv_t        disp_drv;   /* Contains callback functions */
 
-    touch_mux = xSemaphoreCreateBinary();   /* Define a mutex for the touch */
+    // Initialize NVS
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    // Connect to Wi-Fi
+    connect_to_wifi();
+
+    static lv_disp_draw_buf_t disp_buf; /* Contains internal graphic buffer(s) called draw buffer(s) */
+    static lv_disp_drv_t disp_drv;      /* Contains callback functions */
+
+    touch_mux = xSemaphoreCreateBinary(); /* Define a mutex for the touch */
     assert(touch_mux);
 
     /* =============== Initialize SPI bus =============== */
     ESP_LOGI(TAG, "Initialize SPI bus");
 
     const spi_bus_config_t buscfg = ILI9341_PANEL_BUS_SPI_CONFIG(EXAMPLE_PIN_NUM_LCD_PCLK, EXAMPLE_PIN_NUM_LCD_DATA0,
-                                    EXAMPLE_LCD_H_RES * EXAMPLE_LCD_V_RES * sizeof(uint16_t));
+                                                                 EXAMPLE_LCD_H_RES * EXAMPLE_LCD_V_RES * sizeof(uint16_t));
     ESP_ERROR_CHECK(spi_bus_initialize(EXAMPLE_LCD_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
     /* =============== Install panel IO =============== */
@@ -192,7 +283,7 @@ void app_main(void)
 
     esp_lcd_panel_io_handle_t io_handle = NULL;
     const esp_lcd_panel_io_spi_config_t io_config = ILI9341_PANEL_IO_SPI_CONFIG(EXAMPLE_PIN_NUM_LCD_CS, EXAMPLE_PIN_NUM_LCD_DC,
-            example_notify_lvgl_flush_ready, &disp_drv);
+                                                                                example_notify_lvgl_flush_ready, &disp_drv);
 
     /* Attach the LCD to the SPI bus */
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)EXAMPLE_LCD_HOST, &io_config, &io_handle));
@@ -202,14 +293,14 @@ void app_main(void)
 
     esp_lcd_panel_handle_t panel_handle = NULL;
     ili9341_vendor_config_t vendor_config = {
-        .init_cmds      = lcd_init_cmds,
+        .init_cmds = lcd_init_cmds,
         .init_cmds_size = sizeof(lcd_init_cmds) / sizeof(ili9341_lcd_init_cmd_t),
     };
     const esp_lcd_panel_dev_config_t panel_config = {
         .reset_gpio_num = EXAMPLE_PIN_NUM_LCD_RST,
-        .rgb_endian     = LCD_RGB_ENDIAN_RGB,
+        .rgb_endian = LCD_RGB_ENDIAN_RGB,
         .bits_per_pixel = EXAMPLE_LCD_BIT_PER_PIXEL,
-        .vendor_config  = &vendor_config, 
+        .vendor_config = &vendor_config,
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_ili9341(io_handle, &panel_config, &panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
@@ -222,12 +313,12 @@ void app_main(void)
     int i2c_master_port = I2C_MASTER_NUM;
 
     i2c_config_t i2c_conf = {
-        .mode               = I2C_MODE_MASTER,
-        .sda_io_num         = I2C_MASTER_SDA_IO,
-        .scl_io_num         = I2C_MASTER_SCL_IO,
-        .sda_pullup_en      = GPIO_PULLUP_ENABLE,
-        .scl_pullup_en      = GPIO_PULLUP_ENABLE,
-        .master.clk_speed   = I2C_MASTER_FREQ_HZ,
+        .mode = I2C_MODE_MASTER,
+        .sda_io_num = I2C_MASTER_SDA_IO,
+        .scl_io_num = I2C_MASTER_SCL_IO,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master.clk_speed = I2C_MASTER_FREQ_HZ,
     };
 
     i2c_param_config(i2c_master_port, &i2c_conf);
@@ -239,24 +330,24 @@ void app_main(void)
     esp_lcd_panel_io_i2c_config_t tp_io_config = ESP_LCD_TOUCH_IO_I2C_CST816S_CONFIG();
 
     esp_lcd_touch_config_t tp_cfg = {
-        .x_max          = EXAMPLE_LCD_H_RES,
-        .y_max          = EXAMPLE_LCD_V_RES,
-        .rst_gpio_num   = EXAMPLE_LCD_TOUCH_RST,
-        .int_gpio_num   = EXAMPLE_LCD_TOUCH_INT,
+        .x_max = EXAMPLE_LCD_H_RES,
+        .y_max = EXAMPLE_LCD_V_RES,
+        .rst_gpio_num = EXAMPLE_LCD_TOUCH_RST,
+        .int_gpio_num = EXAMPLE_LCD_TOUCH_INT,
         .levels = {
-            .reset      = 0,
-            .interrupt  = 0,
+            .reset = 0,
+            .interrupt = 0,
         },
         .flags = {
-            .swap_xy    = 0,
-            .mirror_x   = 0,
-            .mirror_y   = 0,
+            .swap_xy = 0,
+            .mirror_x = 0,
+            .mirror_y = 0,
         },
         .interrupt_callback = touch_callback,
     };
 
-    esp_lcd_panel_io_handle_t tp_io_handle    = NULL;
-    esp_lcd_touch_handle_t    tp              = NULL;
+    esp_lcd_panel_io_handle_t tp_io_handle = NULL;
+    esp_lcd_touch_handle_t tp = NULL;
     esp_lcd_new_panel_io_i2c((esp_lcd_i2c_bus_handle_t)I2C_MASTER_NUM, &tp_io_config, &tp_io_handle);
     esp_lcd_touch_new_i2c_cst816s(tp_io_handle, &tp_cfg, &tp);
 
@@ -277,21 +368,21 @@ void app_main(void)
     ESP_LOGI(TAG, "Register display driver to LVGL");
 
     lv_disp_drv_init(&disp_drv);
-    disp_drv.hor_res    = EXAMPLE_LCD_H_RES;
-    disp_drv.ver_res    = EXAMPLE_LCD_V_RES;
-    disp_drv.flush_cb   = example_lvgl_flush_cb;
-    disp_drv.draw_buf   = &disp_buf;
-    disp_drv.user_data  = panel_handle;
-    lv_disp_t *disp     = lv_disp_drv_register(&disp_drv);
+    disp_drv.hor_res = EXAMPLE_LCD_H_RES;
+    disp_drv.ver_res = EXAMPLE_LCD_V_RES;
+    disp_drv.flush_cb = example_lvgl_flush_cb;
+    disp_drv.draw_buf = &disp_buf;
+    disp_drv.user_data = panel_handle;
+    lv_disp_t *disp = lv_disp_drv_register(&disp_drv);
 
     /* =============== Register touch driver to LVGL =============== */
     ESP_LOGI(TAG, "Register touch driver to LVGL");
 
-    static lv_indev_drv_t indev_drv;    /* Input device driver (Touch) */
+    static lv_indev_drv_t indev_drv; /* Input device driver (Touch) */
     lv_indev_drv_init(&indev_drv);
-    indev_drv.type      = LV_INDEV_TYPE_POINTER;
-    indev_drv.disp      = disp;
-    indev_drv.read_cb   = example_lvgl_touch_cb;
+    indev_drv.type = LV_INDEV_TYPE_POINTER;
+    indev_drv.disp = disp;
+    indev_drv.read_cb = example_lvgl_touch_cb;
     indev_drv.user_data = tp;
 
     lv_indev_drv_register(&indev_drv);
@@ -301,9 +392,8 @@ void app_main(void)
 
     /* Tick interface for LVGL (using esp_timer to generate 2ms periodic event) */
     const esp_timer_create_args_t lvgl_tick_timer_args = {
-        .callback   = &example_increase_lvgl_tick,
-        .name       = "lvgl_tick"
-    };
+        .callback = &example_increase_lvgl_tick,
+        .name = "lvgl_tick"};
     esp_timer_handle_t lvgl_tick_timer = NULL;
     ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, EXAMPLE_LVGL_TICK_PERIOD_MS * 1000));
@@ -314,4 +404,100 @@ void app_main(void)
     lvgl_mux = xSemaphoreCreateMutex();
     assert(lvgl_mux);
     xTaskCreate(example_lvgl_port_task, "LVGL", EXAMPLE_LVGL_TASK_STACK_SIZE, NULL, EXAMPLE_LVGL_TASK_PRIORITY, NULL);
+}
+
+static void connect_to_wifi(void)
+{
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    esp_event_handler_instance_t instance_any_id;
+    esp_event_handler_instance_t instance_got_ip;
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
+                                                        ESP_EVENT_ANY_ID,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        &instance_any_id));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+                                                        IP_EVENT_STA_GOT_IP,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        &instance_got_ip));
+
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = WIFI_SSID,
+            .password = WIFI_PASS,
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+            .pmf_cfg = {
+                .capable = true,
+                .required = false},
+        },
+    };
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+}
+
+static void wifi_event_handler(void *arg, esp_event_base_t event_base,
+                               int32_t event_id, void *event_data)
+{
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START)
+    {
+        esp_wifi_connect();
+    }
+    else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
+    {
+        if (s_retry_num < MAXIMUM_RETRY)
+        {
+            esp_wifi_connect();
+            s_retry_num++;
+            ESP_LOGI(TAG, "retry to connect to the AP");
+        }
+        else
+        {
+            ESP_LOGI(TAG, "connect to the AP fail");
+        }
+    }
+    else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
+    {
+        s_retry_num = 0;
+        // obtain_time();
+    }
+}
+static void obtain_time(void)
+{
+    initialize_sntp();
+
+    // Wait for time to be set
+    time_t now = 0;
+    struct tm timeinfo = {0};
+    int retry = 0;
+    const int retry_count = 10;
+    while (timeinfo.tm_year < (2016 - 1900) && ++retry < retry_count)
+    {
+        ESP_LOGI(TAG, "Waiting for system time to be set... (%d/%d)", retry, retry_count);
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        time(&now);
+        localtime_r(&now, &timeinfo);
+    }
+    // Time is set
+    ESP_LOGI(TAG, "Time is set");
+}
+
+static void initialize_sntp(void)
+{
+    ESP_LOGI(TAG, "Initializing SNTP");
+
+    // 设置时区为中国标准时间 UTC+8
+    setenv("TZ", "CST-8", 1);
+    tzset();
+
+    sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    sntp_setservername(0, "pool.ntp.org");
+    sntp_init();
 }
